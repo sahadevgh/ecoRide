@@ -13,6 +13,7 @@ contract RiderContract {
         uint256 completedDeliveries;
         uint256 totalRatings;
         uint256 ratingCount;
+        uint256 averageRating;
         uint256 totalEarnings;
         string city;
         string bikeModel;
@@ -39,9 +40,15 @@ contract RiderContract {
     Rider[] public riderList;
     Rider[] public removedRiders;
 
-    event NewApplicant(address indexed applicant);
-    event RiderRegistered(address indexed rider);
-    event RiderVerified(address indexed rider);
+    event NewApplicant(address indexed applicant, uint256 timestamp);
+    event RiderRegistered(address indexed rider, uint256 timestamp);
+    event RiderVerified(address indexed rider, uint256 timestamp);
+    event RiderRatingUpdated(
+        address indexed rider,
+        uint256 rating,
+        uint256 timestamp
+    );
+    event ApplicantRemoved(address indexed applicant, uint256 timestamp);
 
     constructor(address _userContractAddress) {
         userContractAddress = _userContractAddress;
@@ -85,7 +92,7 @@ contract RiderContract {
         applicants[msg.sender] = Applicant(msg.sender, true);
         applicantList.push(applicants[msg.sender]);
 
-        emit NewApplicant(msg.sender);
+        emit NewApplicant(msg.sender, block.timestamp);
     }
 
     function verifyRider(address _applicantAddress) external onlyAdmin {
@@ -114,6 +121,7 @@ contract RiderContract {
             0,
             0,
             0,
+            0,
             "",
             "",
             "",
@@ -127,7 +135,7 @@ contract RiderContract {
         // Reset the escrow fee to 0
         applicantEscrowFee[_applicantAddress] = 0;
 
-        emit RiderVerified(_applicantAddress);
+        emit RiderVerified(_applicantAddress, block.timestamp);
     }
 
     function rejectRider(address _applicantAddress) external onlyAdmin {
@@ -150,6 +158,26 @@ contract RiderContract {
         applicantEscrowFee[_applicantAddress] = 0;
         // remove applicant
         delete applicants[_applicantAddress];
+
+        // emit event
+        emit ApplicantRemoved(_applicantAddress, block.timestamp);
+    }
+
+    // Update rider rating
+    function updateRiderRating(
+        address _rider,
+        uint256 _rating
+    ) external {
+        require(riders[_rider].verified, "Rider not verified");
+        require(_rating >= 1 && _rating <= 5, "Invalid rating");
+
+        // Update rider rating
+        riders[_rider].totalRatings += _rating;
+        riders[_rider].ratingCount++;
+        riders[_rider].averageRating = riders[_rider].totalRatings / riders[_rider].ratingCount;
+
+        // emit event
+        emit RiderRatingUpdated(_rider, _rating, block.timestamp);
     }
 
     modifier onlyRider() {

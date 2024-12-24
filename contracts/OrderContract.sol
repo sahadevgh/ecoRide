@@ -9,12 +9,17 @@ interface IUserContract {
 
 interface IRiderContract {
     function getRider(address _address) external view returns (bool);
+    function updateRiderRating(address _rider, uint256 _rating) external;
 }
 
 interface IPaymentContract {
-    function depositPayment(uint256 _orderId) external payable;
+    function depositOrderPayment(uint256 _orderId) external payable;
 
     function releasePayment(uint256 _orderId, address _rider) external;
+
+    function refundPartialPayment(uint256 _orderId, address _user) external;
+
+    function refundPayment(uint256 _orderId, address _user) external;
 }
 
 contract OrderContract is ReentrancyGuard {
@@ -27,8 +32,8 @@ contract OrderContract is ReentrancyGuard {
     }
 
     struct Order {
-        address user;
-        address rider;
+        address payable user;
+        address payable rider;
         uint256 fee;
         uint256 tip;
         string pickupLocation;
@@ -42,7 +47,6 @@ contract OrderContract is ReentrancyGuard {
     }
 
     mapping(uint256 => Order) public orders;
-    mapping(uint256 => uint256) public escrow;
     uint256 public orderCounter;
 
     address public userContractAddress;
@@ -55,15 +59,17 @@ contract OrderContract is ReentrancyGuard {
         uint256 fee,
         uint256 tip,
         string pickupLocation,
-        string destination
+        string destination,
+        uint256 timestamp
     );
-    event OrderAccepted(uint256 indexed orderId, address indexed rider);
-    event OrderCompleted(uint256 indexed orderId);
-    event OrderCancelled(uint256 indexed orderId);
+    event OrderAccepted(uint256 indexed orderId, address indexed rider, uint256 timestamp);
+    event OrderCompleted(uint256 indexed orderId, address indexed rider, uint256 timestamp);
+    event OrderCancelled(uint256 indexed orderId, address indexed user, uint256 timestamp);
     event FeedbackAdded(
         uint256 indexed orderId,
         uint256 rating,
-        string comment
+        string comment,
+        uint256 timestamp
     );
 
     constructor(
@@ -76,10 +82,10 @@ contract OrderContract is ReentrancyGuard {
         paymentContractAddress = _paymentContractAddress;
     }
 
-    modifier onlyUser() {
+    modifier onlyVerifiedUser() {
         require(
             IUserContract(userContractAddress).isVerifiedUser(msg.sender),
-            "Caller must be a registered user"
+            "Caller must be a verified user"
         );
         _;
     }
@@ -87,7 +93,7 @@ contract OrderContract is ReentrancyGuard {
     modifier onlyRider() {
         require(
             IRiderContract(riderContractAddress).getRider(msg.sender),
-            "Caller must be a registered rider"
+            "Caller must be a verified rider"
         );
         _;
     }
@@ -97,16 +103,11 @@ contract OrderContract is ReentrancyGuard {
         string memory _pickupLocation,
         string memory _destination,
         uint256 _tip
-    ) external payable onlyUser returns (uint256) {
-        require(
-            msg.value == _fee + _tip,
-            "Total payment must include fee and tip"
-        );
-
+    ) external onlyVerifiedUser returns (uint256) {
         orderCounter++;
         orders[orderCounter] = Order(
-            msg.sender,
-            address(0),
+            payable(msg.sender),
+            payable(address(0)),
             _fee,
             _tip,
             _pickupLocation,
@@ -119,9 +120,9 @@ contract OrderContract is ReentrancyGuard {
             ""
         );
 
-        uint256 totalAmount = msg.value;
+        uint256 totalAmount = _fee + _tip;
 
-        IPaymentContract(paymentContractAddress).depositPayment{
+        IPaymentContract(paymentContractAddress).depositOrderPayment{
             value: totalAmount
         }(orderCounter);
 
@@ -131,7 +132,8 @@ contract OrderContract is ReentrancyGuard {
             _fee,
             _tip,
             _pickupLocation,
-            _destination
+            _destination,
+            block.timestamp
         );
         return orderCounter;
     }
@@ -143,9 +145,9 @@ contract OrderContract is ReentrancyGuard {
             "Order not in pending state"
         );
 
-        order.rider = msg.sender;
+        order.rider = payable(msg.sender);
         order.status = OrderStatus.Accepted;
-        emit OrderAccepted(_orderId, msg.sender);
+        emit OrderAccepted(_orderId, msg.sender, block.timestamp);
     }
 
     function startOrder(uint256 _orderId) external onlyRider {
@@ -161,15 +163,18 @@ contract OrderContract is ReentrancyGuard {
         require(order.rider == msg.sender, "Only assigned rider can complete");
         require(order.status == OrderStatus.Accepted, "Order not in progress");
 
-        order.status = OrderStatus.Completed;
-        // payable(order.rider).transfer(escrow[_orderId]);
-
         // Integrate the PaymentContract
+        IPaymentContract(paymentContractAddress).releasePayment(
+            _orderId,
+            order.rider
+        );
 
-        emit OrderCompleted(_orderId);
+        order.status = OrderStatus.Completed;
+        emit OrderCompleted(_orderId, msg.sender, block.timestamp);
     }
 
-    function cancelOrder(uint256 _orderId) external nonReentrant {
+    // Cancel order by the user
+    function userCancelOrder(uint256 _orderId) external onlyVerifiedUser nonReentrant {
         Order storage order = orders[_orderId];
         require(order.user == msg.sender, "Only user can cancel");
         require(
@@ -177,15 +182,31 @@ contract OrderContract is ReentrancyGuard {
             "Cannot cancel completed order"
         );
 
-        if (order.status == OrderStatus.Accepted) {
-            payable(order.rider).transfer(escrow[_orderId]);
+        if (order.status == OrderStatus.InProgress) {
+            IPaymentContract(paymentContractAddress).releasePayment(_orderId, order.rider);
+        } else if (order.status == OrderStatus.Accepted) {
+            IPaymentContract(paymentContractAddress).refundPartialPayment(_orderId, order.user);
         } else {
-            payable(order.user).transfer(escrow[_orderId]);
+            IPaymentContract(paymentContractAddress).refundPayment(_orderId, order.user);
         }
 
-        escrow[_orderId] = 0;
         order.status = OrderStatus.Cancelled;
-        emit OrderCancelled(_orderId);
+        emit OrderCancelled(_orderId, msg.sender, block.timestamp);
+    }
+
+    // Cancel order by the rider
+    function riderCancelOrder(uint256 _orderId) external onlyRider {
+        Order storage order = orders[_orderId];
+        require(order.rider == msg.sender, "Only rider can cancel");
+        require(
+            order.status != OrderStatus.Completed,
+            "Cannot cancel completed order"
+        );
+
+        IPaymentContract(paymentContractAddress).refundPayment(_orderId, order.user);
+
+        order.status = OrderStatus.Cancelled;
+        emit OrderCancelled(_orderId, msg.sender, block.timestamp);
     }
 
     function addFeedback(
@@ -203,7 +224,10 @@ contract OrderContract is ReentrancyGuard {
         require(_rating >= 1 && _rating <= 5, "Rating must be between 1 and 5");
 
         order.riderRating = _rating;
+        // Send feedback to the rider contract
+        IRiderContract(riderContractAddress).updateRiderRating(order.rider, _rating);
+
         order.userComment = _comment;
-        emit FeedbackAdded(_orderId, _rating, _comment);
+        emit FeedbackAdded(_orderId, _rating, _comment, block.timestamp);
     }
 }
