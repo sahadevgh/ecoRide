@@ -30,4 +30,9 @@ contract UserContract {
         users[_user].verified = true;
         emit userVerified(_user);
     }
+
+    // Check if an address is a registered user
+    function isVerifiedUser(address _address) external view returns (bool) {
+        return users[_address].verified;
+    }
 }
